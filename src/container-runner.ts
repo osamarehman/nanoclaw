@@ -2,9 +2,18 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+
+/** Recursively chown a directory tree to the given uid/gid. */
+function chownRecursive(dir: string, uid: number, gid: number): void {
+  try {
+    execFileSync('chown', ['-R', `${uid}:${gid}`, dir], { stdio: 'ignore' });
+  } catch {
+    // Non-root host — best-effort
+  }
+}
 
 import {
   CONTAINER_IMAGE,
@@ -63,6 +72,7 @@ function buildVolumeMounts(
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
   const groupDir = resolveGroupFolderPath(group.folder);
+  chownRecursive(groupDir, 1000, 1000);
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -157,6 +167,8 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+  // Ensure container user (node, uid 1000) can write to .claude/
+  chownRecursive(groupSessionsDir, 1000, 1000);
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -166,9 +178,12 @@ function buildVolumeMounts(
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);
-  fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
-  fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+  for (const sub of ['messages', 'tasks', 'input']) {
+    const dir = path.join(groupIpcDir, sub);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.chownSync(dir, 1000, 1000);
+  }
+  fs.chownSync(groupIpcDir, 1000, 1000);
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -193,6 +208,7 @@ function buildVolumeMounts(
   if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
+  chownRecursive(groupAgentRunnerDir, 1000, 1000);
   mounts.push({
     hostPath: groupAgentRunnerDir,
     containerPath: '/app/src',
